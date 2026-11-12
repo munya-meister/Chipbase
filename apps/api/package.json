@@ -1,0 +1,22 @@
+{
+  "name": "@chipbase/api",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "fastify": "^5.3.0",
+    "pg": "^8.14.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.11.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}

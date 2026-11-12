@@ -1,0 +1,17 @@
+{
+  "name": "chipbase",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev -w @chipbase/api\" \"npm run dev -w @chipbase/dashboard\"",
+    "build": "npm run build -w @chipbase/api && npm run build -w @chipbase/dashboard",
+    "typecheck": "npm run typecheck -w @chipbase/api && npm run typecheck -w @chipbase/dashboard"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3"
+  }
+}
