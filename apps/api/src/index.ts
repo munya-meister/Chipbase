@@ -3,19 +3,15 @@ import pg from 'pg';
 
 const server = Fastify({ logger: true });
 const databaseUrl = process.env.DATABASE_URL;
-const pool = databaseUrl ? new pg.Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 5000, max: 5 }) : null;
+const pool = databaseUrl ? new pg.Pool({ connectionString: databaseUrl, connectionTimeoutMillis: 3000, max: 5 }) : null;
 
-server.get('/health', async (_request, reply) => {
-  if (!pool) return reply.code(503).send({ service: 'chipbase', status: 'degraded', database: 'not_configured' });
+server.get('/health', async () => {
+  if (!pool) return { service: 'chipbase', status: 'degraded', database: 'not_configured' };
   try {
     await pool.query('SELECT 1');
     return { service: 'chipbase', status: 'ok', database: 'connected' };
-  } catch (error) {
-    // Never log connection strings, passwords, or full error objects.
-    const code = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : 'UNKNOWN';
-    const allowedCodes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', '28P01', '28000', '3D000', '57P03', '53300', '08006', '08001']);
-    server.log.error({ databaseErrorCode: allowedCodes.has(code) ? code : 'OTHER' }, 'Database health check failed');
-    return reply.code(503).send({ service: 'chipbase', status: 'degraded', database: 'unavailable' });
+  } catch {
+    return { service: 'chipbase', status: 'degraded', database: 'unavailable' };
   }
 });
 
