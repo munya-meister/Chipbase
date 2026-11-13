@@ -15,6 +15,7 @@ export default function App(){
  const [studioSearch,setStudioSearch]=useState('');
  const [studioValues,setStudioValues]=useState<Record<string,unknown>>({});
  const [studioEditId,setStudioEditId]=useState<string|null>(null);
+ const [pendingDeleteId,setPendingDeleteId]=useState<string|null>(null);
  const [studioBusy,setStudioBusy]=useState(false);
  const [provisioning,setProvisioning]=useState<string|null>(null);
  const [repositories,setRepositories]=useState<{id:number;full_name:string;installation_id:number}[]>([]);
@@ -39,7 +40,7 @@ export default function App(){
   const j=await r.json();if(!r.ok)throw new Error(j.error||'Database request failed');return j;
  };
  const openStudio=async(p:Project)=>{
-  setStudioProject(p);setStudioTable(null);setStudioRows(null);setStudioValues({});setStudioBusy(true);setMessage('');
+  setStudioProject(p);setPendingDeleteId(null);setStudioTable(null);setStudioRows(null);setStudioValues({});setStudioBusy(true);setMessage('');
   try{const j=await studioRequest('/api/developer/projects/'+p.id+'/tables');setStudioTables(j.tables||[]);}
   catch(e){setMessage((e as Error).message);}finally{setStudioBusy(false);}
  };
@@ -66,13 +67,13 @@ export default function App(){
   }catch(e){setMessage((e as Error).message);}finally{setStudioBusy(false);}
  };
  const deleteStudioRow=async(id:string)=>{
-  if(!studioProject||!studioTable||!window.confirm('Permanently delete this record? This cannot be undone.'))return;
+  if(!studioProject||!studioTable||pendingDeleteId!==id)return;
   setStudioBusy(true);setMessage('');
-  try{await studioRequest('/api/developer/projects/'+studioProject.id+'/tables/'+encodeURIComponent(studioTable)+'/rows/'+id,{method:'DELETE'});await refreshRows(studioTable);setMessage('Record deleted.');}
+  try{await studioRequest('/api/developer/projects/'+studioProject.id+'/tables/'+encodeURIComponent(studioTable)+'/rows/'+encodeURIComponent(id),{method:'DELETE'});await refreshRows(studioTable);setPendingDeleteId(null);setMessage('Record deleted.');}
   catch(e){setMessage((e as Error).message);}finally{setStudioBusy(false);}
  };
  const showStudioRows=async(table:string)=>{
-  if(!studioProject)return;setStudioTable(table);setStudioEditId(null);setStudioValues({});setStudioSearch('');setStudioBusy(true);setMessage('');
+  if(!studioProject)return;setPendingDeleteId(null);setStudioTable(table);setStudioEditId(null);setStudioValues({});setStudioSearch('');setStudioBusy(true);setMessage('');
   try{await refreshRows(table);}
   catch(e){setMessage((e as Error).message);}finally{setStudioBusy(false);}
  };
@@ -110,7 +111,7 @@ export default function App(){
  {studioRows.filter(r=>JSON.stringify(r).toLowerCase().includes(studioSearch.toLowerCase())).map((r,i)=><tr key={String(r.id)||i}>
  {Object.values(r).map((v,j)=><td key={j} style={{padding:8,borderTop:'1px solid #32505a',maxWidth:220,overflowWrap:'anywhere'}}>{v===null?'NULL':String(v)}</td>)}
  <td style={{whiteSpace:'nowrap'}}><button className="secondary" type="button" disabled={studioBusy} onClick={()=>{setStudioEditId(String(r.id));setStudioValues(Object.fromEntries(Object.entries(r).filter(([k])=>k!=='id').map(([k,v])=>[k,v])));}}>Edit</button>
- <button className="secondary" type="button" disabled={studioBusy} onClick={()=>void deleteStudioRow(String(r.id))}>Delete</button></td></tr>)}</tbody></table>:<p>No rows in this table.</p>}
+ {pendingDeleteId===String(r.id)?<span style={{display:'inline-flex',gap:6,alignItems:'center',flexWrap:'wrap'}}><span style={{fontSize:13}}>Delete permanently?</span><button className="secondary" type="button" disabled={studioBusy} onClick={()=>void deleteStudioRow(String(r.id))}>{studioBusy?'Deleting…':'Confirm delete'}</button><button className="secondary" type="button" disabled={studioBusy} onClick={()=>setPendingDeleteId(null)}>Cancel</button></span>:<button className="secondary" type="button" disabled={studioBusy} onClick={()=>{setMessage('');setPendingDeleteId(String(r.id));}}>Delete</button>}</td></tr>)}</tbody></table>:<p>No rows in this table.</p>}
  <form onSubmit={saveStudioRow} style={{display:'grid',gap:10,marginTop:20}}>
  <h3>{studioEditId?'Edit record':'Add record'}</h3>
  {(studioTables.find(t=>t.name===studioTable)?.columns||[]).filter(c=>c.name!=='id').map(c=><label key={c.name} style={{display:'grid',gap:5}}>
