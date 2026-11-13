@@ -34,6 +34,7 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
         expires_at timestamptz NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now()
       );
+      CREATE TABLE IF NOT EXISTS github_login_tickets (ticket_hash text PRIMARY KEY, developer_id uuid NOT NULL REFERENCES developer_accounts(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL);
       CREATE TABLE IF NOT EXISTS github_oauth_states (
         state_hash text PRIMARY KEY,
         expires_at timestamptz NOT NULL
@@ -66,11 +67,19 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
         VALUES($1,$2,$3,$4) ON CONFLICT(github_user_id) DO UPDATE SET
         login=EXCLUDED.login,display_name=EXCLUDED.display_name,avatar_url=EXCLUDED.avatar_url,updated_at=now()
         RETURNING id`,[user.id,user.login,user.name||null,user.avatar_url||null]);
-      const session=randomBytes(32).toString('hex');
-      await pool.query('INSERT INTO developer_sessions(token_hash,developer_id,expires_at) VALUES($1,$2,now()+interval \'7 days\')',[hash(session),result.rows[0].id]);
-      reply.header('Set-Cookie',cookie('chipbase_session',session,604800,'/'));
-      return reply.redirect(dashboard+'/?github_login=success');
+      const ticket=randomBytes(32).toString('hex');
+      await pool.query('INSERT INTO github_login_tickets(ticket_hash,developer_id,expires_at) VALUES($1,$2,now()+interval \'2 minutes\')',[hash(ticket),result.rows[0].id]);
+      return reply.redirect(dashboard+'/?github_ticket='+encodeURIComponent(ticket));
     }catch {server.log.error('GitHub OAuth callback failed');return fail('server_error');}
+  });
+  server.post<{Body:{ticket?:string}}>('/api/developer/exchange',{schema:{body:{type:'object',required:['ticket'],additionalProperties:false,properties:{ticket:{type:'string',minLength:64,maxLength:64}}}}},async(request,reply)=>{
+    if(!pool||!valid(request.body.ticket))return reply.code(401).send({error:'Invalid login ticket'});
+    const found=await pool.query('DELETE FROM github_login_tickets WHERE ticket_hash=$1 AND expires_at>now() RETURNING developer_id',[hash(request.body.ticket)]);
+    if(found.rowCount!==1)return reply.code(401).send({error:'Expired login ticket'});
+    const session=randomBytes(32).toString('hex');
+    await pool.query('INSERT INTO developer_sessions(token_hash,developer_id,expires_at) VALUES($1,$2,now()+interval \'7 days\')',[hash(session),found.rows[0].developer_id]);
+    reply.header('Set-Cookie',cookie('chipbase_session',session,604800,'/'));
+    return {authenticated:true};
   });
   const getUser=async(header?:string)=>{
     const session=readCookie(header,'chipbase_session');
