@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import pg from 'pg';
+import { registerGithubAuth } from './github-auth.js';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 const server = Fastify({ logger: true });
@@ -25,6 +26,7 @@ const initialize = async () => {
       created_at timestamptz NOT NULL DEFAULT now()
     )`);
 };
+await registerGithubAuth(server, pool);
 server.get('/health', async (_request, reply) => {
   if (!pool) return reply.code(503).send({ service: 'chipbase', status: 'degraded', database: 'not_configured' });
   try {
@@ -55,7 +57,7 @@ server.post<{ Body: { name?: string; slug?: string } }>('/api/projects', { preHa
     return reply.code(500).send({ error: 'Unable to create project' });
   }
 });
-server.get('/api/platform', async () => ({ name: 'Chipbase', version: '0.2.0', status: 'admin-preview' }));
+server.get('/api/platform', async () => ({ name: 'Chipbase', version: '0.3.0', status: 'developer-auth-preview' }));
 const shutdown = async () => { await server.close(); if (pool) await pool.end(); };
 process.on('SIGINT', () => { void shutdown().then(() => process.exit(0)); });
 process.on('SIGTERM', () => { void shutdown().then(() => process.exit(0)); });

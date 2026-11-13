@@ -1,17 +1,17 @@
 # Chipbase
 
-Self-hosted backend platform (admin preview v0.2).
+Chipbase v0.3 developer authentication preview. Admin project management is separate from GitHub developer sign-in.
 
-## Deployment
+## Render API
 
-API on Render: set `DATABASE_URL` to the PostgreSQL **Internal Database URL**. Set `CHIPBASE_ADMIN_TOKEN` to a cryptographically random secret of **at least 32 characters** (e.g. generate locally with `openssl rand -hex 32`). Do not put this token in Git, Vercel environment variables or browser build files. Render build: `npm install --include=dev && npm run build --workspace @chipbase/api`; start: `npm run start --workspace @chipbase/api`.
+Configure `DATABASE_URL`, `CHIPBASE_ADMIN_TOKEN` (32+ random characters), `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`. The GitHub App redirect URI must be exactly `https://chipbase-api.onrender.com/auth/github/callback`. Keep GitHub secrets and PEM keys server-side only. The GitHub App private key is **not required** for the OAuth login step; it will be used for repository installations later.
 
-Dashboard on Vercel: root directory `apps/dashboard`. The `vercel.json` rewrites forward `/api/*` and `/health` to the Render API. After both deploy, open the dashboard, enter the admin token in the sign-in form, and create a project. Token is kept in browser sessionStorage until sign-out or the tab session ends; use only on trusted devices. Use HTTPS.
+Build: `npm install --include=dev && npm run build --workspace @chipbase/api`. Start: `npm run start --workspace @chipbase/api`.
 
-## Local development
+## Vercel dashboard
 
-Requires Node.js 22+, npm and Docker Compose. Copy `.env.example` to `.env`, configure PostgreSQL and `CHIPBASE_ADMIN_TOKEN`. Run `docker compose up -d db`, `npm install`, and `npm run dev`. Dashboard at http://127.0.0.1:5173; API at http://127.0.0.1:4000/health.
+Root directory `apps/dashboard`. The Vercel rewrites forward `/api/*` and `/health` to the Render API. GitHub OAuth starts on the Render domain, sets an HttpOnly secure cookie there, and redirects to the dashboard. **Important:** Cross-site browser cookie restrictions may prevent the Vercel dashboard from reading that Render cookie via the Vercel proxy. For reliable production login, use a shared custom domain (e.g. dashboard and API subdomains of the same site), or an explicit secure one-time code handoff on the dashboard origin. Until that is implemented, GitHub OAuth is a backend preview and must not be considered production-ready.
 
-## Scope and security
+## Security / limitations
 
-The API requires a configured admin bearer token for all project endpoints. Project creation inserts **metadata only**; no per-project database, tenant isolation, user auth, storage, or generated REST API exists yet. Do not expose the admin token to end users or connect untrusted applications directly. Rotate it if compromised. Add rate limiting, audited user accounts, CSRF-aware cookie sessions, and project-level authorization before public beta.
+GitHub access tokens are used transiently to retrieve profile data and are not stored. Login state is one-use and expires after 10 minutes. Developer sessions are random opaque tokens stored hashed in PostgreSQL and expire after 7 days. No developer project provisioning, tenant isolation, GitHub App installations, or repository sync yet. The admin token is not for other developers.
