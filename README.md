@@ -1,17 +1,26 @@
-# Chipbase
+# Chipbase v0.4.0 — Developer projects preview
 
-Chipbase v0.3 developer authentication preview. Admin project management is separate from GitHub developer sign-in.
+GitHub OAuth login, persistent developer accounts and **per-developer project metadata** are supported. Each developer can list and create only their own project records via cookie-authenticated endpoints. Admin project records remain separate.
 
-## Render API
+## GitHub App installation
 
-Configure `DATABASE_URL`, `CHIPBASE_ADMIN_TOKEN` (32+ random characters), `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`. The GitHub App redirect URI must be exactly `https://chipbase-api.onrender.com/auth/github/callback`. Keep GitHub secrets and PEM keys server-side only. The GitHub App private key is **not required** for the OAuth login step; it will be used for repository installations later.
+Install at https://github.com/apps/chipbase-cloud/installations/new and select specific repositories. **Installation does not yet connect a repository to a project**. App installation token exchange, installation ownership verification and repository linking are the next milestone. Do not claim repository sync or provisioning works yet.
 
-Build: `npm install --include=dev && npm run build --workspace @chipbase/api`. Start: `npm run start --workspace @chipbase/api`.
+## API
 
-## Vercel dashboard
+- GET /api/developer/me
+- GET /api/developer/projects
+- POST /api/developer/projects — {name, slug}
+- GET /api/developer/github-install — installation link
+- POST /api/developer/logout
+- Admin endpoints /api/projects remain admin-only.
 
-Root directory `apps/dashboard`. The Vercel rewrites forward `/api/*` and `/health` to the Render API. GitHub OAuth starts on the Render domain, sets an HttpOnly secure cookie there, and redirects to the dashboard. **Important:** Cross-site browser cookie restrictions may prevent the Vercel dashboard from reading that Render cookie via the Vercel proxy. For reliable production login, use a shared custom domain (e.g. dashboard and API subdomains of the same site), or an explicit secure one-time code handoff on the dashboard origin. Until that is implemented, GitHub OAuth is a backend preview and must not be considered production-ready.
+## Deploy
 
-## Security / limitations
+Render API requires DATABASE_URL, CHIPBASE_ADMIN_TOKEN (32+ random chars), GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET. Keep the GitHub App private key server-side. Build: `npm install --include=dev && npm run build --workspace @chipbase/api`. Start: `npm run start --workspace @chipbase/api`.
 
-GitHub access tokens are used transiently to retrieve profile data and are not stored. Login state is one-use and expires after 10 minutes. Developer sessions are random opaque tokens stored hashed in PostgreSQL and expire after 7 days. No developer project provisioning, tenant isolation, GitHub App installations, or repository sync yet. The admin token is not for other developers.
+Vercel root: `apps/dashboard`. Rewrites proxy /api/* to Render. GitHub login uses a one-time ticket redeemed on the dashboard origin. The session cookie is HttpOnly, Secure and SameSite=Lax.
+
+## Limitations
+
+Projects are **metadata only**, not provisioned databases. No project API keys, tenant data stores, repository linkage or webhook processing. Do not expose project provisioning to the public before authorization, rate limiting and quota controls are implemented.
