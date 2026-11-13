@@ -1,3 +1,4 @@
+import { registerProjectProvisioning } from './project-provisioning.js';
 import { randomBytes, createHash, timingSafeEqual, createSign } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
@@ -96,6 +97,7 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
       WHERE s.token_hash=$1 AND s.expires_at>now()`, [hash(session)]);
     return result.rows[0] || null;
   };
+  await registerProjectProvisioning(server, pool, getUser);
   server.get('/auth/github/start', async (_request, reply) => {
     if (!pool || !clientId || !clientSecret) return reply.code(503).send({error:'GitHub login unavailable'});
     const state = randomBytes(32).toString('hex');
