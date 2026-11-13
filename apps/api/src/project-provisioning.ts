@@ -67,4 +67,68 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
       client.release();
     }
   });
+  // Restricted database studio: owner-only, allowlisted identifiers and column types.
+  const identifier = (s:string) => /^[a-z][a-z0-9_]{0,47}$/.test(s);
+  const quoted = (s:string) => '"'+s+'"';
+  const resolveSchema = async(id:string,userId:string) => {
+    if(!pool||!validId(id))return null;
+    const r=await pool.query(`SELECT d.schema_name FROM project_databases d
+      JOIN developer_projects p ON p.id=d.project_id
+      WHERE p.id=$1 AND p.developer_id=$2`,[id,userId]);
+    return r.rows[0]?.schema_name as string|undefined;
+  };
+  const types:Record<string,string>={text:'text',integer:'integer',boolean:'boolean',numeric:'numeric',timestamp:'timestamptz',uuid:'uuid'};
+  server.get<{Params:{id:string}}>('/api/developer/projects/:id/tables',async(request,reply)=>{
+    try {
+      const user=await getUser(request.headers.cookie);
+      if(!user)return reply.code(401).send({error:'Not signed in'});
+      const schema=await resolveSchema(request.params.id,user.id);
+      if(!schema)return reply.code(404).send({error:'Provisioned project not found'});
+      const r=await pool!.query(`SELECT table_name,column_name,data_type,is_nullable,ordinal_position
+        FROM information_schema.columns WHERE table_schema=$1 ORDER BY table_name,ordinal_position`,[schema]);
+      const grouped:Record<string,{name:string;columns:{name:string;type:string;nullable:boolean}[]}>=Object.create(null);
+      for(const row of r.rows){
+        if(!Object.hasOwn(grouped,row.table_name))grouped[row.table_name]={name:row.table_name,columns:[]};
+        grouped[row.table_name].columns.push({name:row.column_name,type:row.data_type,nullable:row.is_nullable==='YES'});
+      }
+      return {tables:Object.values(grouped)};
+    }catch{return reply.code(503).send({error:'Unable to list database tables'});}
+  });
+  server.post<{Params:{id:string};Body:{name:string;columns:{name:string;type:string}[]}}>('/api/developer/projects/:id/tables',{
+    schema:{body:{type:'object',additionalProperties:false,required:['name','columns'],properties:{
+      name:{type:'string',minLength:1,maxLength:48},
+      columns:{type:'array',minItems:1,maxItems:20,items:{type:'object',additionalProperties:false,required:['name','type'],properties:{name:{type:'string',minLength:1,maxLength:48},type:{type:'string',enum:['text','integer','boolean','numeric','timestamp','uuid']}}}}
+    }}}
+  },async(request,reply)=>{
+    try {
+      const user=await getUser(request.headers.cookie);
+      if(!user)return reply.code(401).send({error:'Not signed in'});
+      const db=await resolveSchema(request.params.id,user.id);
+      if(!db)return reply.code(404).send({error:'Provisioned project not found'});
+      const {name,columns}=request.body;
+      if(!identifier(name)||!columns.every(c=>identifier(c.name)&&types[c.type])||new Set(columns.map(c=>c.name)).size!==columns.length||columns.some(c=>c.name==='id'))return reply.code(400).send({error:'Invalid table or column names'});
+      const defs=['"id" uuid PRIMARY KEY DEFAULT gen_random_uuid()',...columns.map(c=>quoted(c.name)+' '+types[c.type])];
+      await pool!.query('CREATE TABLE '+quoted(db)+'.'+quoted(name)+' ('+defs.join(',')+')');
+      return reply.code(201).send({table:name});
+    }catch(error){
+      if(typeof error==='object'&&error!==null&&'code' in error&&error.code==='42P07')return reply.code(409).send({error:'Table already exists'});
+      server.log.error('Database studio table creation failed');
+      return reply.code(503).send({error:'Unable to create table'});
+    }
+  });
+  server.get<{Params:{id:string;table:string}}>('/api/developer/projects/:id/tables/:table/rows',async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);
+      if(!user)return reply.code(401).send({error:'Not signed in'});
+      const db=await resolveSchema(request.params.id,user.id);
+      if(!db)return reply.code(404).send({error:'Provisioned project not found'});
+      const name=request.params.table;
+      if(!identifier(name))return reply.code(400).send({error:'Invalid table name'});
+      const exists=await pool!.query(`SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2 AND table_type='BASE TABLE'`,[db,name]);
+      if(!exists.rowCount)return reply.code(404).send({error:'Table not found'});
+      const result=await pool!.query('SELECT * FROM '+quoted(db)+'.'+quoted(name)+' LIMIT 100');
+      return {rows:result.rows,limit:100};
+    }catch{return reply.code(503).send({error:'Unable to retrieve rows'});}
+  });
+
 }
