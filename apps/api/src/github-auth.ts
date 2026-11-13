@@ -1,7 +1,37 @@
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual, createSign } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 
+const appId = process.env.GITHUB_APP_ID;
+const privateKey = process.env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const githubApi = async (url: string, token: string, options: {method?:string} = {}) => {
+  const response = await fetch(url, {method:options.method || 'GET',headers:{Accept:'application/vnd.github+json',Authorization:'Bearer '+token,'User-Agent':'Chipbase-Cloud','X-GitHub-Api-Version':'2022-11-28'},signal:AbortSignal.timeout(12000)});
+  if (!response.ok) throw new Error('GitHub API request failed: '+response.status);
+  return response.json() as Promise<any>;
+};
+const appJwt = () => {
+  if (!appId || !privateKey) throw new Error('GitHub App credentials missing');
+  const now = Math.floor(Date.now()/1000);
+  const encode = (value:object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const unsigned = encode({alg:'RS256',typ:'JWT'})+'.'+encode({iat:now-60,exp:now+540,iss:appId});
+  const signer = createSign('RSA-SHA256');signer.update(unsigned);signer.end();
+  return unsigned+'.'+signer.sign(privateKey,'base64url');
+};
+const allowedRepositories = async (githubId:string) => {
+  const jwt = appJwt();
+  const installations = await githubApi('https://api.github.com/app/installations?per_page=100',jwt) as any[];
+  const owned = installations.filter(i=>String(i.account?.id)===String(githubId));
+  const repositories: {id:number;full_name:string;private:boolean;installation_id:number}[] = [];
+  for (const installation of owned) {
+    const token = await githubApi('https://api.github.com/app/installations/'+installation.id+'/access_tokens',jwt,{method:'POST'});
+    for (let page=1;page<=10;page++) {
+      const result = await githubApi('https://api.github.com/installation/repositories?per_page=100&page='+page,token.token);
+      for(const r of result.repositories || []) repositories.push({id:r.id,full_name:r.full_name,private:r.private,installation_id:installation.id});
+      if((result.repositories || []).length<100)break;
+    }
+  }
+  return repositories;
+};
 const clientId = process.env.GITHUB_CLIENT_ID;
 const clientSecret = process.env.GITHUB_CLIENT_SECRET;
 const callback = 'https://chipbase-api.onrender.com/auth/github/callback';
@@ -54,10 +84,14 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
       )`);
     } catch { server.log.error('Developer schema initialization failed'); }
   }
+  if (pool) {
+    try {await pool.query('ALTER TABLE developer_projects ADD COLUMN IF NOT EXISTS github_repository_id bigint; ALTER TABLE developer_projects ADD COLUMN IF NOT EXISTS github_repository_full_name text; ALTER TABLE developer_projects ADD COLUMN IF NOT EXISTS github_installation_id bigint');}
+    catch {server.log.error('Repository link schema migration failed');}
+  }
   const getUser = async (header?: string) => {
     const session = readCookie(header, 'chipbase_session');
     if (!pool || !valid(session)) return null;
-    const result = await pool.query(`SELECT a.id,a.login,a.display_name,a.avatar_url
+    const result = await pool.query(`SELECT a.id,a.login,a.display_name,a.avatar_url,a.github_user_id
       FROM developer_sessions s JOIN developer_accounts a ON a.id=s.developer_id
       WHERE s.token_hash=$1 AND s.expires_at>now()`, [hash(session)]);
     return result.rows[0] || null;
@@ -107,7 +141,7 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
   });
   server.get('/api/developer/projects',async(request,reply)=>{
     try {const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
-      const result=await pool!.query('SELECT id,name,slug,status,created_at FROM developer_projects WHERE developer_id=$1 ORDER BY created_at DESC LIMIT 100',[user.id]);
+      const result=await pool!.query('SELECT id,name,slug,status,created_at,github_repository_id,github_repository_full_name FROM developer_projects WHERE developer_id=$1 ORDER BY created_at DESC LIMIT 100',[user.id]);
       return {projects:result.rows};
     }catch{return reply.code(503).send({error:'Unable to load projects'});}
   });
@@ -117,6 +151,23 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
       const result=await pool!.query('INSERT INTO developer_projects(developer_id,name,slug) VALUES($1,$2,$3) RETURNING id,name,slug,status,created_at',[user.id,name,request.body.slug]);
       return reply.code(201).send({project:result.rows[0]});
     }catch(error){if(typeof error==='object'&&error!==null&&'code' in error&&error.code==='23505')return reply.code(409).send({error:'Project slug already exists'});return reply.code(503).send({error:'Unable to create project'});}
+  });
+  server.get('/api/developer/repositories',async(request,reply)=>{
+    try {const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      return {repositories:await allowedRepositories(user.github_user_id)};
+    } catch {return reply.code(503).send({error:'Cannot retrieve GitHub repositories. Check App ID and private key on Render.'});}
+  });
+  server.post<{Params:{id:string};Body:{repository_id:number}}>('/api/developer/projects/:id/repository',{
+    schema:{params:{type:'object',required:['id'],properties:{id:{type:'string',format:'uuid'}}},body:{type:'object',required:['repository_id'],additionalProperties:false,properties:{repository_id:{type:'integer',minimum:1}}}}
+  },async(request,reply)=>{
+    try {
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const permitted=(await allowedRepositories(user.github_user_id)).find(r=>r.id===request.body.repository_id);
+      if(!permitted)return reply.code(403).send({error:'Repository not authorized for this GitHub account'});
+      const updated=await pool!.query('UPDATE developer_projects SET github_repository_id=$1,github_repository_full_name=$2,github_installation_id=$3 WHERE id=$4 AND developer_id=$5 RETURNING id,name,slug,status,github_repository_full_name',[permitted.id,permitted.full_name,permitted.installation_id,request.params.id,user.id]);
+      if(!updated.rowCount)return reply.code(404).send({error:'Project not found'});
+      return {project:updated.rows[0]};
+    }catch{return reply.code(503).send({error:'Unable to link repository'});}
   });
   server.get('/api/developer/github-install',async(request,reply)=>{
     const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});

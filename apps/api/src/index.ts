@@ -57,7 +57,7 @@ server.post<{ Body: { name?: string; slug?: string } }>('/api/projects', { preHa
     return reply.code(500).send({ error: 'Unable to create project' });
   }
 });
-server.get('/api/platform', async () => ({ name: 'Chipbase', version: '0.4.0', status: 'developer-projects-preview' }));
+server.get('/api/platform', async () => ({ name: 'Chipbase', version: '0.5.0', status: 'repository-linking-preview' }));
 const shutdown = async () => { await server.close(); if (pool) await pool.end(); };
 process.on('SIGINT', () => { void shutdown().then(() => process.exit(0)); });
 process.on('SIGTERM', () => { void shutdown().then(() => process.exit(0)); });
