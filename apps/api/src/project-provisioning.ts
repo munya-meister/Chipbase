@@ -131,4 +131,67 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
     }catch{return reply.code(503).send({error:'Unable to retrieve rows'});}
   });
 
+  // v0.8.0: developer-only CRUD. No public data API or cross-project access.
+  const getTable=async(id:string,table:string,userId:string)=>{
+    const schema=await resolveSchema(id,userId);
+    if(!schema||!identifier(table))return null;
+    const r=await pool!.query(`SELECT column_name,data_type FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`,[schema,table]);
+    if(!r.rows.length||!r.rows.some(c=>c.column_name==='id'&&c.data_type==='uuid'))return null;
+    return {schema,columns:r.rows as {column_name:string;data_type:string}[]};
+  };
+  const editableTypes=new Set(['text','integer','boolean','numeric','timestamp with time zone','uuid']);
+  const validValue=(value:unknown,type:string)=>{
+    if(value===null)return true;
+    if(type==='text')return typeof value==='string'&&value.length<=10000;
+    if(type==='boolean')return typeof value==='boolean';
+    if(type==='integer')return typeof value==='number'&&Number.isSafeInteger(value)&&value>=-2147483648&&value<=2147483647;
+    if(type==='numeric')return typeof value==='number'&&Number.isFinite(value);
+    if(type==='uuid')return typeof value==='string'&&validId(value);
+    if(type==='timestamp with time zone')return typeof value==='string'&&value.length<=40&&!Number.isNaN(Date.parse(value));
+    return false;
+  };
+  const checkValues=(values:Record<string,unknown>,columns:{column_name:string;data_type:string}[])=>{
+    const allowed=new Map(columns.filter(c=>c.column_name!=='id'&&editableTypes.has(c.data_type)).map(c=>[c.column_name,c.data_type]));
+    return Object.keys(values).length<=40&&Object.entries(values).every(([key,value])=>allowed.has(key)&&validValue(value,allowed.get(key)!));
+  };
+  const mutationSchema={body:{type:'object',additionalProperties:false,required:['values'],properties:{
+    values:{type:'object',minProperties:1,maxProperties:40,additionalProperties:{anyOf:[{type:'string',maxLength:10000},{type:'number'},{type:'boolean'},{type:'null'}]}}
+  }}} as const;
+  server.post<{Params:{id:string;table:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      const values=request.body.values;
+      if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(values);
+      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'+(i+1)).join(',')+') RETURNING *',keys.map(k=>values[k]));
+      return reply.code(201).send({row:result.rows[0]});
+    }catch{return reply.code(400).send({error:'Unable to insert record; check column types and required values'});}
+  });
+  server.patch<{Params:{id:string;table:string;rowId:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId)||!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid record or values'});
+      const keys=Object.keys(request.body.values);
+      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'=+(i+1)).join(',')+' WHERE "id"=+(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {row:result.rows[0]};
+    }catch{return reply.code(400).send({error:'Unable to update record; check values'});}
+  });
+  server.delete<{Params:{id:string;table:string;rowId:string}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+      const result=await pool!.query('DELETE FROM '+quoted(t.schema)+'.'+quoted(request.params.table)+' WHERE "id"=$1 RETURNING id',[request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {deleted:true};
+    }catch{return reply.code(503).send({error:'Unable to delete record'});}
+  });
+
 }
