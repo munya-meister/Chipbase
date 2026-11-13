@@ -166,7 +166,7 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
       const values=request.body.values;
       if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
       const keys=Object.keys(values);
-      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'+(i+1)).join(',')+') RETURNING *',keys.map(k=>values[k]));
+      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'$'+(i+1)).join(',')+') RETURNING *',keys.map(k=>values[k]));
       return reply.code(201).send({row:result.rows[0]});
     }catch{return reply.code(400).send({error:'Unable to insert record; check column types and required values'});}
   });
@@ -177,7 +177,7 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
       if(!t)return reply.code(404).send({error:'Table not found'});
       if(!validId(request.params.rowId)||!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid record or values'});
       const keys=Object.keys(request.body.values);
-      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'=+(i+1)).join(',')+' WHERE "id"=+(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
+      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'=$'+(i+1)).join(',')+' WHERE "id"=$'+(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
       if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
       return {row:result.rows[0]};
     }catch{return reply.code(400).send({error:'Unable to update record; check values'});}
