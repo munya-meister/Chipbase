@@ -35,11 +35,7 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
         created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE TABLE IF NOT EXISTS github_login_tickets (ticket_hash text PRIMARY KEY, developer_id uuid NOT NULL REFERENCES developer_accounts(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL);
-      CREATE TABLE IF NOT EXISTS developer_projects (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        developer_id uuid NOT NULL REFERENCES developer_accounts(id) ON DELETE CASCADE,
-        name text NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
-        slug text NOT NULL CHECK (slug ~ '^[a-z][a-z0-9-]{2,47}
+      CREATE TABLE IF NOT EXISTS developer_projects (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), developer_id uuid NOT NULL REFERENCES developer_accounts(id) ON DELETE CASCADE, name text NOT NULL CHECK (length(name) BETWEEN 1 AND 120), slug text NOT NULL CHECK (slug ~ '^[a-z][a-z0-9-]{2,47}
         state_hash text PRIMARY KEY,
         expires_at timestamptz NOT NULL
       )`);
@@ -94,9 +90,9 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
   };
   server.get('/api/developer/projects',async(request,reply)=>{
     try {const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
-      const rows=await pool!.query('SELECT id,name,slug,status,github_repository_full_name,created_at FROM developer_projects WHERE developer_id=$1 ORDER BY created_at DESC LIMIT 100',[user.id]);
-      return {projects:rows.rows};
-    }catch{return reply.code(503).send({error:'Unable to load developer projects'});}
+      const result=await pool!.query('SELECT id,name,slug,status,created_at FROM developer_projects WHERE developer_id=$1 ORDER BY created_at DESC LIMIT 100',[user.id]);
+      return {projects:result.rows};
+    }catch{return reply.code(503).send({error:'Unable to load projects'});}
   });
   server.post<{Body:{name:string;slug:string}}>('/api/developer/projects',{schema:{body:{type:'object',required:['name','slug'],additionalProperties:false,properties:{name:{type:'string',minLength:1,maxLength:120},slug:{type:'string',pattern:'^[a-z][a-z0-9-]{2,47}async(request,reply)=>{
     try {const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});return {user};}
@@ -109,14 +105,7 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
     return {ok:true};
   });
 }
-),
-        status text NOT NULL DEFAULT 'planned' CHECK (status IN ('planned','provisioning','ready','failed','suspended')),
-        github_repository_id bigint,
-        github_repository_full_name text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        UNIQUE (developer_id,slug)
-      );
-      CREATE INDEX IF NOT EXISTS developer_projects_owner_idx ON developer_projects(developer_id);
+), status text NOT NULL DEFAULT 'planned', created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(developer_id,slug));
       CREATE TABLE IF NOT EXISTS github_oauth_states (
         state_hash text PRIMARY KEY,
         expires_at timestamptz NOT NULL
@@ -184,13 +173,13 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
 }}}}},async(request,reply)=>{
     try {const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
       const name=request.body.name.trim();if(!name)return reply.code(400).send({error:'Project name required'});
-      const result=await pool!.query('INSERT INTO developer_projects(developer_id,name,slug) VALUES($1,$2,$3) RETURNING id,name,slug,status,github_repository_full_name,created_at',[user.id,name,request.body.slug]);
+      const result=await pool!.query('INSERT INTO developer_projects(developer_id,name,slug) VALUES($1,$2,$3) RETURNING id,name,slug,status,created_at',[user.id,name,request.body.slug]);
       return reply.code(201).send({project:result.rows[0]});
-    }catch(error){if(typeof error==='object'&&error!==null&&'code' in error&&error.code==='23505')return reply.code(409).send({error:'You already have a project with that slug'});return reply.code(503).send({error:'Unable to create developer project'});}
+    }catch(error){if(typeof error==='object'&&error!==null&&'code' in error&&error.code==='23505')return reply.code(409).send({error:'Project slug already exists'});return reply.code(503).send({error:'Unable to create project'});}
   });
   server.get('/api/developer/github-install',async(request,reply)=>{
     const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
-    return {url:'https://github.com/apps/chipbase-cloud/installations/new',note:'Choose only repositories you want to authorize. Repository linking is not yet enabled.'};
+    return {url:'https://github.com/apps/chipbase-cloud/installations/new'};
   });
   server.get('/api/developer/me',async(request,reply)=>{
     try {const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});return {user};}
@@ -203,14 +192,7 @@ export async function registerGithubAuth(server: FastifyInstance, pool: pg.Pool 
     return {ok:true};
   });
 }
-),
-        status text NOT NULL DEFAULT 'planned' CHECK (status IN ('planned','provisioning','ready','failed','suspended')),
-        github_repository_id bigint,
-        github_repository_full_name text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        UNIQUE (developer_id,slug)
-      );
-      CREATE INDEX IF NOT EXISTS developer_projects_owner_idx ON developer_projects(developer_id);
+), status text NOT NULL DEFAULT 'planned', created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(developer_id,slug));
       CREATE TABLE IF NOT EXISTS github_oauth_states (
         state_hash text PRIMARY KEY,
         expires_at timestamptz NOT NULL
