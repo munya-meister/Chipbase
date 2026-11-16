@@ -131,6 +131,30 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
     }catch{return reply.code(503).send({error:'Unable to retrieve rows'});}
   });
 
+  // Phase 3 foundation: authenticated project API discovery, never a public data endpoint.
+  server.get<{Params:{id:string}}>('/api/developer/projects/:id/data-api', async (request, reply) => {
+    try {
+      const user = await getUser(request.headers.cookie);
+      if (!user) return reply.code(401).send({error:'Not signed in'});
+      if (!validId(request.params.id)) return reply.code(400).send({error:'Invalid project ID'});
+      const schema = await resolveSchema(request.params.id, user.id);
+      if (!schema) return reply.code(404).send({error:'Provisioned project not found'});
+      const result = await pool!.query(
+        'SELECT table_name FROM information_schema.tables WHERE table_schema=$1 AND table_type=$2 ORDER BY table_name',
+        [schema, 'BASE TABLE']);
+      return {
+        project_id: request.params.id,
+        status: 'private_preview',
+        public_access_enabled: false,
+        authentication: 'developer_session',
+        tables: result.rows.map((row:{table_name:string})=>row.table_name),
+        note: 'Application API keys and public REST access are not enabled. Do not embed developer cookies in applications.'
+      };
+    } catch {
+      return reply.code(503).send({error:'Unable to retrieve project API configuration'});
+    }
+  });
+
   // v0.8.0: developer-only CRUD. No public data API or cross-project access.
   const getTable=async(id:string,table:string,userId:string)=>{
     const schema=await resolveSchema(id,userId);
