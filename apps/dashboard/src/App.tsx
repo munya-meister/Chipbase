@@ -36,7 +36,7 @@ export default function App(){
  };
  const refreshDeveloper=async()=>{const r=await fetch('/api/developer/projects',{credentials:'include'});if(!r.ok)throw new Error('Unable to load your projects');const list=(await r.json()).projects||[];setProjects(list);await refreshDatabaseStatuses(list);};
  const studioRequest=async(path:string,options:RequestInit={})=>{
-  const r=await fetch(path,{...options,credentials:'include',headers:{'Content-Type':'application/json',...options.headers}});
+  const r=await fetch(path,{...options,credentials:'include',headers:{...(options.body!==undefined?{'Content-Type':'application/json'}:{}),...options.headers}});
   const j=await r.json();if(!r.ok)throw new Error(j.error||'Database request failed');return j;
  };
  const openStudio=async(p:Project)=>{
