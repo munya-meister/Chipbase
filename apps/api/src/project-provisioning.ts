@@ -1,3 +1,4 @@
+import {randomBytes,createHash} from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 
@@ -14,6 +15,62 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
       provisioned_at timestamptz NOT NULL DEFAULT now()
     )`);
   }
+  if (pool) {
+    await pool.query(`CREATE TABLE IF NOT EXISTS project_api_keys (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id uuid NOT NULL REFERENCES developer_projects(id) ON DELETE CASCADE,
+      name varchar(80) NOT NULL,
+      key_prefix varchar(24) NOT NULL,
+      key_hash char(64) NOT NULL UNIQUE,
+      permissions text[] NOT NULL DEFAULT ARRAY['read']::text[],
+      created_at timestamptz NOT NULL DEFAULT now(),
+      revoked_at timestamptz
+    )`);
+    await pool.query('CREATE INDEX IF NOT EXISTS project_api_keys_project_idx ON project_api_keys(project_id)');
+  }
+  // Keys are hashed at rest, displayed once, and scoped to a single owner-verified project.
+  // These credentials are NOT accepted by any public data endpoint yet.
+  const apiKeyOwner = async (projectId:string, cookie?:string) => {
+    const user=await getUser(cookie);
+    if(!user || !pool || !/^[0-9a-f-]{36}$/i.test(projectId)) return null;
+    const owned=await pool.query('SELECT id FROM developer_projects WHERE id=$1 AND developer_id=$2',[projectId,user.id]);
+    return owned.rowCount ? user : null;
+  };
+  server.get<{Params:{id:string}}>('/api/developer/projects/:id/api-keys',async(request,reply)=>{
+    try {
+      const owner=await apiKeyOwner(request.params.id,request.headers.cookie);
+      if(!owner)return reply.code(404).send({error:'Project not found or not authorized'});
+      const keys=await pool!.query('SELECT id,name,key_prefix,permissions,created_at,revoked_at FROM project_api_keys WHERE project_id=$1 ORDER BY created_at DESC LIMIT 100',[request.params.id]);
+      return {keys:keys.rows,public_access_enabled:false};
+    }catch{return reply.code(503).send({error:'Unable to list API keys'});}
+  });
+  server.post<{Params:{id:string};Body:{name:string;permissions?:string[]}}>('/api/developer/projects/:id/api-keys',{
+    schema:{body:{type:'object',additionalProperties:false,required:['name'],properties:{
+      name:{type:'string',minLength:1,maxLength:80},
+      permissions:{type:'array',minItems:1,maxItems:2,uniqueItems:true,items:{type:'string',enum:['read','write']}}
+    }}}
+  },async(request,reply)=>{
+    try {
+      const owner=await apiKeyOwner(request.params.id,request.headers.cookie);
+      if(!owner)return reply.code(404).send({error:'Project not found or not authorized'});
+      const permissions=request.body.permissions||['read'];
+      const raw='cb_live_'+randomBytes(32).toString('base64url');
+      const hash=createHash('sha256').update(raw).digest('hex');
+      const prefix=raw.slice(0,16);
+      const result=await pool!.query('INSERT INTO project_api_keys(project_id,name,key_prefix,key_hash,permissions) VALUES($1,$2,$3,$4,$5) RETURNING id,name,key_prefix,permissions,created_at',[request.params.id,request.body.name.trim(),prefix,hash,permissions]);
+      return reply.code(201).send({key:raw,metadata:result.rows[0],warning:'Save this secret now. It cannot be retrieved again. Public API access is not yet enabled.'});
+    }catch{return reply.code(503).send({error:'Unable to create API key'});}
+  });
+  server.delete<{Params:{id:string;keyId:string}}>('/api/developer/projects/:id/api-keys/:keyId',async(request,reply)=>{
+    try {
+      const owner=await apiKeyOwner(request.params.id,request.headers.cookie);
+      if(!owner)return reply.code(404).send({error:'Project not found or not authorized'});
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.params.keyId))return reply.code(400).send({error:'Invalid key ID'});
+      const result=await pool!.query('UPDATE project_api_keys SET revoked_at=now() WHERE project_id=$1 AND id=$2 AND revoked_at IS NULL RETURNING id',[request.params.id,request.params.keyId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Active key not found'});
+      return {revoked:true};
+    }catch{return reply.code(503).send({error:'Unable to revoke API key'});}
+  });
   const schemaName = (id: string) => 'cb_' + id.replace(/-/g, '');
   const validId = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
