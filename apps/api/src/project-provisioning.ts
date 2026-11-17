@@ -29,7 +29,7 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
     await pool.query('CREATE INDEX IF NOT EXISTS project_api_keys_project_idx ON project_api_keys(project_id)');
   }
   // Keys are hashed at rest, displayed once, and scoped to a single owner-verified project.
-  // These credentials are NOT accepted by any public data endpoint yet.
+  // Keys grant server-to-server read-only access when the read permission is present.
   const apiKeyOwner = async (projectId:string, cookie?:string) => {
     const user=await getUser(cookie);
     if(!user || !pool || !/^[0-9a-f-]{36}$/i.test(projectId)) return null;
@@ -58,7 +58,7 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
       const hash=createHash('sha256').update(raw).digest('hex');
       const prefix=raw.slice(0,16);
       const result=await pool!.query('INSERT INTO project_api_keys(project_id,name,key_prefix,key_hash,permissions) VALUES($1,$2,$3,$4,$5) RETURNING id,name,key_prefix,permissions,created_at',[request.params.id,request.body.name.trim(),prefix,hash,permissions]);
-      return reply.code(201).send({key:raw,metadata:result.rows[0],warning:'Save this secret now. It cannot be retrieved again. Public API access is not yet enabled.'});
+      return reply.code(201).send({key:raw,metadata:result.rows[0],warning:'Save this secret now. It cannot be retrieved again. Read-only server-to-server Data API is available for keys with read permission.'});
     }catch{return reply.code(503).send({error:'Unable to create API key'});}
   });
   server.delete<{Params:{id:string;keyId:string}}>('/api/developer/projects/:id/api-keys/:keyId',async(request,reply)=>{
@@ -70,6 +70,41 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
       if(!result.rowCount)return reply.code(404).send({error:'Active key not found'});
       return {revoked:true};
     }catch{return reply.code(503).send({error:'Unable to revoke API key'});}
+  });
+  // Server-to-server, read-only Data API. The bearer secret must never be
+  // embedded in browser JavaScript or transmitted in a URL.
+  server.get<{Params:{id:string;table:string};Querystring:{limit?:number}}>('/api/data/:id/:table',{
+    schema:{querystring:{type:'object',additionalProperties:false,properties:{limit:{type:'integer',minimum:1,maximum:100}}}}
+  },async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    reply.header('X-Content-Type-Options','nosniff');
+    if(!pool)return reply.code(503).send({error:'Database unavailable'});
+    const auth=request.headers.authorization||'';
+    if(!/^Bearer cb_live_[A-Za-z0-9_-]{43}$/.test(auth))return reply.code(401).send({error:'Valid project API key required'});
+    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.params.id)
+       || !/^[a-z][a-z0-9_]{0,47}$/.test(request.params.table))
+      return reply.code(400).send({error:'Invalid project or table'});
+    try{
+      const keyHash=createHash('sha256').update(auth.slice(7)).digest('hex');
+      const authorized=await pool.query(
+        `SELECT d.schema_name FROM project_api_keys k
+         JOIN project_databases d ON d.project_id=k.project_id
+         WHERE k.project_id=$1 AND k.key_hash=$2 AND k.revoked_at IS NULL
+           AND 'read'=ANY(k.permissions) LIMIT 1`,[request.params.id,keyHash]);
+      if(!authorized.rowCount)return reply.code(403).send({error:'API key not authorized for this project or permission'});
+      const schema=authorized.rows[0].schema_name as string;
+      // Schema comes from internal provisioning; table name is strictly validated.
+      const found=await pool.query(`SELECT 1 FROM information_schema.tables
+        WHERE table_schema=$1 AND table_name=$2 AND table_type='BASE TABLE'`,[schema,request.params.table]);
+      if(!found.rowCount)return reply.code(404).send({error:'Table not found'});
+      const limit=request.query.limit||25;
+      const safeSchema='"'+schema.replace(/"/g,'""')+'"';
+      const safeTable='"'+request.params.table+'"';
+      const rows=await pool.query('SELECT * FROM '+safeSchema+'.'+safeTable+' LIMIT $1',[limit]);
+      return {data:rows.rows,count:rows.rowCount,limit};
+    }catch{
+      return reply.code(503).send({error:'Unable to retrieve project data'});
+    }
   });
   const schemaName = (id: string) => 'cb_' + id.replace(/-/g, '');
   const validId = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
