@@ -5,6 +5,15 @@ type Project={id:string;name:string;slug:string;status:string;github_repository_
 const modules=[{name:'Database',description:'SQL tables and data',icon:Database},{name:'Authentication',description:'Users and access control',icon:KeyRound},{name:'Storage',description:'Buckets and files',icon:HardDrive},{name:'Data API',description:'Project REST endpoints',icon:Server},{name:'Realtime',description:'Live subscriptions',icon:Radio},{name:'Monitoring',description:'Health and logs',icon:Activity}];
 const stored=()=>sessionStorage.getItem('chipbase_admin_token')||'';
 export default function App(){
+ const [keysProject,setKeysProject]=useState<Project|null>(null);
+ const [apiKeys,setApiKeys]=useState<{id:string;name:string;key_prefix:string;permissions:string[];revoked_at:string|null}[]>([]);
+ const [keyName,setKeyName]=useState('');
+ const [keyPermissions,setKeyPermissions]=useState<string[]>(['read']);
+ const [newKey,setNewKey]=useState('');
+ const [keysBusy,setKeysBusy]=useState(false);
+ const openKeys=async(p:Project)=>{setKeysProject(p);setNewKey('');setKeysBusy(true);try{const j=await studioRequest('/api/developer/projects/'+p.id+'/api-keys');setApiKeys(j.keys||[]);}catch(e){setMessage((e as Error).message);}finally{setKeysBusy(false);}};
+ const createKey=async()=>{if(!keysProject||!keyName.trim())return;setKeysBusy(true);try{const j=await studioRequest('/api/developer/projects/'+keysProject.id+'/api-keys',{method:'POST',body:JSON.stringify({name:keyName.trim(),permissions:keyPermissions})});setNewKey(j.key);setKeyName('');const k=await studioRequest('/api/developer/projects/'+keysProject.id+'/api-keys');setApiKeys(k.keys||[]);setMessage('API key created. Copy it now; it will not be shown again.');}catch(e){setMessage((e as Error).message);}finally{setKeysBusy(false);}};
+ const revokeKey=async(id:string)=>{if(!keysProject||!window.confirm('Permanently revoke this API key?'))return;setKeysBusy(true);try{await studioRequest('/api/developer/projects/'+keysProject.id+'/api-keys/'+id,{method:'DELETE'});const j=await studioRequest('/api/developer/projects/'+keysProject.id+'/api-keys');setApiKeys(j.keys||[]);setMessage('API key revoked.');}catch(e){setMessage((e as Error).message);}finally{setKeysBusy(false);}};
  const [databaseStatuses,setDatabaseStatuses]=useState<Record<string,{status:string;schema_name:string|null;provisioned_at:string|null}>>({});
  const [studioProject,setStudioProject]=useState<Project|null>(null);
  const [studioTables,setStudioTables]=useState<{name:string;columns:{name:string;type:string}[]}[]>([]);
@@ -133,12 +142,23 @@ export default function App(){
  <div><button type="button" className="secondary" disabled={studioColumns.length>=20} onClick={()=>setStudioColumns(old=>[...old,{name:'',type:'text'}])}>+ Add column</button></div>
  <div><button className="newproject" disabled={studioBusy}>{studioBusy?'Working…':'Create table'}</button></div>
  </form>
+ </div>:null}{keysProject?<div className="panel" style={{marginTop:20}}>
+ <div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center',flexWrap:'wrap'}}><h2>API Keys — {keysProject.name}</h2><button type="button" className="secondary" onClick={()=>{setKeysProject(null);setNewKey('');}}>Close</button></div>
+ <p>Project-specific credentials. Public Data API endpoints are not enabled yet. Never embed a secret key in frontend code.</p>
+ <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+ <input aria-label="API key name" placeholder="Key name" value={keyName} maxLength={80} onChange={e=>setKeyName(e.target.value)}/>
+ <label><input type="checkbox" checked={keyPermissions.includes('read')} onChange={e=>setKeyPermissions(v=>e.target.checked?[...v,'read']:v.filter(x=>x!=='read'))}/> Read</label>
+ <label><input type="checkbox" checked={keyPermissions.includes('write')} onChange={e=>setKeyPermissions(v=>e.target.checked?[...v,'write']:v.filter(x=>x!=='write'))}/> Write</label>
+ <button className="newproject" disabled={keysBusy||!keyName.trim()||!keyPermissions.length} onClick={()=>void createKey()}>Generate key</button></div>
+ {newKey?<div style={{marginTop:16,padding:14,border:'1px solid #54d7c5',borderRadius:8}}><strong>Copy this secret now — it will not be displayed again.</strong><div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:10}}><code style={{overflowWrap:'anywhere'}}>{newKey}</code><button className="secondary" onClick={()=>void navigator.clipboard.writeText(newKey)}>Copy key</button><button className="secondary" onClick={()=>setNewKey('')}>I've saved it</button></div></div>:null}
+ <h3 style={{marginTop:20}}>Issued keys</h3>
+ {apiKeys.length?apiKeys.map(k=><div key={k.id} style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center',flexWrap:'wrap',padding:'12px 0',borderBottom:'1px solid #29454d'}}><span><strong>{k.name}</strong><small style={{display:'block'}}>{k.key_prefix}… · {k.permissions.join(', ')} · {k.revoked_at?'Revoked':'Active'}</small></span>{!k.revoked_at?<button className="secondary" disabled={keysBusy} onClick={()=>void revokeKey(k.id)}>Revoke</button>:null}</div>):<p>No API keys yet.</p>}
  </div>:null}<div className="bottom"><div className="panel"><h2>Recent projects</h2>{developer&&!verified?<button className="secondary" onClick={loadRepositories} disabled={repoBusy}>{repoBusy?'Loading repositories…':'Refresh GitHub repositories'}</button>:null}{projects.length?projects.map(p=><div key={p.id} className="project"><Database size={18}/><span>{p.name}<small>{p.slug}</small>{p.github_repository_full_name?<small>Linked: {p.github_repository_full_name}</small>:developer&&!verified?<span><select aria-label={'Link GitHub repository to '+p.name} defaultValue="" disabled={repoBusy||!repositories.length} onChange={e=>{if(e.target.value)void linkRepository(p.id,Number(e.target.value));}}><option value="">Select authorized repository</option>{repositories.map(r=><option key={r.id} value={r.id}>{r.full_name}</option>)}</select></span>:null}
  {developer&&!verified?<span style={{display:'block',marginTop:12}}>
   <small>Database: {databaseStatuses[p.id]?.status==='ready'?'Ready':databaseStatuses[p.id]?.status==='not_provisioned'?'Not provisioned':'Checking / unavailable'}</small>
   {databaseStatuses[p.id]?.schema_name?<small style={{overflowWrap:'anywhere'}}>Schema: {databaseStatuses[p.id].schema_name}</small>:null}
   {databaseStatuses[p.id]?.provisioned_at?<small>Provisioned: {new Date(databaseStatuses[p.id].provisioned_at!).toLocaleString()}</small>:null}
-  {databaseStatuses[p.id]?.status==='ready'?<button type="button" className="secondary" style={{marginTop:8}} onClick={()=>void openStudio(p)}>Open database studio</button>:null}
+  {databaseStatuses[p.id]?.status==='ready'?<button type="button" className="secondary" style={{marginTop:8}} onClick={()=>void openStudio(p)}>Open database studio</button>:null}{databaseStatuses[p.id]?.status==='ready'?<button type="button" className="secondary" style={{marginTop:8}} onClick={()=>void openKeys(p)}>Manage API keys</button>:null}
   {databaseStatuses[p.id]?.status==='not_provisioned'?<button type="button" className="secondary" style={{marginTop:8}} disabled={provisioning!==null} onClick={()=>void provisionDatabase(p)}>{provisioning===p.id?'Provisioning…':'Provision database'}</button>:null}
  </span>:null}</span><small>{p.status}</small></div>):<div className="empty"><FolderOpen size={30}/><b>No projects yet</b><p>Create your first project metadata record.</p></div>}</div><div className="panel"><h2>Infrastructure</h2><p>API hosted on Render; dashboard hosted on Vercel.</p><code>/health</code><code>/api/projects • protected</code><div className="tip"><ShieldCheck size={17}/> Never expose the admin token in client build configuration.</div></div></div></>}</div></main></div>;
 }
