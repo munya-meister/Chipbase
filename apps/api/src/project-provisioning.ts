@@ -81,9 +81,10 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
     if(!pool)return reply.code(503).send({error:'Database unavailable'});
     const auth=request.headers.authorization||'';
     if(!/^Bearer cb_live_[A-Za-z0-9_-]{43}$/.test(auth))return reply.code(401).send({error:'Valid project API key required'});
-    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.params.id)
-       || !/^[a-z][a-z0-9_]{0,47}$/.test(request.params.table))
-      return reply.code(400).send({error:'Invalid project or table'});
+    const projectIdValid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.params.id);
+    const tableValid=/^[a-z][a-z0-9_]{0,47}$/.test(request.params.table);
+    if(!projectIdValid || !tableValid)
+      return reply.code(400).send({error:'Invalid project or table',invalid_fields:[...(!projectIdValid?['project_id']:[]),...(!tableValid?['table']:[])],hint:'Verify the exact request URL and remove any placeholder text.'});
     try{
       const keyHash=createHash('sha256').update(auth.slice(7)).digest('hex');
       const authorized=await pool.query(
