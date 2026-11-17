@@ -311,4 +311,62 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
     }catch{return reply.code(503).send({error:'Unable to delete record'});}
   });
 
+  // Server-to-server Data API mutations. API keys must have 'write' permission.
+  const writeTable=async(id:string,table:string,auth:string|undefined)=>{
+    if(!pool||!validId(id)||!identifier(table)||!auth||!/^Bearer cb_live_[A-Za-z0-9_-]{43}$/.test(auth))return null;
+    const hash=createHash('sha256').update(auth.slice(7)).digest('hex');
+    const access=await pool.query(`SELECT d.schema_name FROM project_api_keys k
+      JOIN project_databases d ON d.project_id=k.project_id
+      WHERE k.project_id=$1 AND k.key_hash=$2 AND k.revoked_at IS NULL
+        AND 'write'=ANY(k.permissions) LIMIT 1`,[id,hash]);
+    if(!access.rowCount)return null;
+    const schema=access.rows[0].schema_name as string;
+    const columns=await pool.query(`SELECT column_name,data_type FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`,[schema,table]);
+    if(!columns.rows.some(c=>c.column_name==='id'&&c.data_type==='uuid'))return null;
+    return {schema,columns:columns.rows as {column_name:string;data_type:string}[]};
+  };
+  server.post<{Params:{id:string;table:string};Body:{values:Record<string,unknown>}}>('/api/data/:id/:table',{schema:mutationSchema},async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    try{
+      const t=await writeTable(request.params.id,request.params.table,request.headers.authorization);
+      if(!t)return reply.code(403).send({error:'Write access denied or table unavailable'});
+      const values=request.body.values;
+      if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(values);
+      const placeholders=keys.map((_,i)=>'$'+(i+1)).join(',');
+      const sql='INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+placeholders+') RETURNING *';
+      const result=await pool!.query(sql,keys.map(k=>values[k]));
+      return reply.code(201).send({row:result.rows[0]});
+    }catch{return reply.code(400).send({error:'Unable to insert record'});}
+  });
+  server.patch<{Params:{id:string;table:string;rowId:string};Body:{values:Record<string,unknown>}}>('/api/data/:id/:table/:rowId',{schema:mutationSchema},async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+    try{
+      const t=await writeTable(request.params.id,request.params.table,request.headers.authorization);
+      if(!t)return reply.code(403).send({error:'Write access denied or table unavailable'});
+      const values=request.body.values;
+      if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(values);
+      const setters=keys.map((k,i)=>quoted(k)+'=$'+(i+1)).join(',');
+      const sql='UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+setters+' WHERE "id"=$'+(keys.length+1)+' RETURNING *';
+      const result=await pool!.query(sql,[...keys.map(k=>values[k]),request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {row:result.rows[0]};
+    }catch{return reply.code(400).send({error:'Unable to update record'});}
+  });
+  server.delete<{Params:{id:string;table:string;rowId:string}}>('/api/data/:id/:table/:rowId',async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+    try{
+      const t=await writeTable(request.params.id,request.params.table,request.headers.authorization);
+      if(!t)return reply.code(403).send({error:'Write access denied or table unavailable'});
+      const sql='DELETE FROM '+quoted(t.schema)+'.'+quoted(request.params.table)+' WHERE "id"=$1 RETURNING id';
+      const result=await pool!.query(sql,[request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {deleted:true};
+    }catch{return reply.code(503).send({error:'Unable to delete record'});}
+  });
+
 }
