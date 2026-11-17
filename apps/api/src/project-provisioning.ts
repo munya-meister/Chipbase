@@ -272,6 +272,179 @@ export async function registerProjectProvisioning(server: FastifyInstance, pool:
     const allowed=new Map(columns.filter(c=>c.column_name!=='id'&&editableTypes.has(c.data_type)).map(c=>[c.column_name,c.data_type]));
     return Object.keys(values).length<=40&&Object.entries(values).every(([key,value])=>allowed.has(key)&&validValue(value,allowed.get(key)!));
   };
+  // External Data API writes: trusted backends only, with project-scoped write keys.
+  const externalMutationSchema={body:{type:'object',additionalProperties:false,required:['values'],properties:{
+    values:{type:'object',minProperties:1,maxProperties:40,additionalProperties:{anyOf:[{type:'string',maxLength:10000},{type:'number'},{type:'boolean'},{type:'null'}]}}
+  }}} as const;
+  const externalWriteTable=async(id:string,table:string,authorization?:string)=>{
+    if(!pool||!validId(id)||!identifier(table)||!authorization||!/^Bearer cb_live_[A-Za-z0-9_-]{43}$/.test(authorization))return null;
+    const keyHash=createHash('sha256').update(authorization.slice(7)).digest('hex');
+    const auth=await pool.query(`SELECT d.schema_name FROM project_api_keys k
+      JOIN project_databases d ON d.project_id=k.project_id
+      WHERE k.project_id=$1 AND k.key_hash=$2 AND k.revoked_at IS NULL
+      AND 'write'=ANY(k.permissions) LIMIT 1`,[id,keyHash]);
+    if(!auth.rowCount)return null;
+    const schema=auth.rows[0].schema_name as string;
+    const columns=await pool.query(`SELECT column_name,data_type FROM information_schema.columns
+      WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`,[schema,table]);
+    if(!columns.rows.some(c=>c.column_name==='id'&&c.data_type==='uuid'))return null;
+    return {schema,columns:columns.rows as {column_name:string;data_type:string}[]};
+  };
+  server.post<{Params:{id:string;table:string};Body:{values:Record<string,unknown>}}>('/api/data/:id/:table',{schema:externalMutationSchema},async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    try{
+      const t=await externalWriteTable(request.params.id,request.params.table,request.headers.authorization);
+      if(!t)return reply.code(403).send({error:'Write access denied or table unavailable'});
+      if(!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(request.body.values);
+      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'{type:'object',additionalProperties:false,required:['values'],properties:{
+    values:{type:'object',minProperties:1,maxProperties:40,additionalProperties:{anyOf:[{type:'string',maxLength:10000},{type:'number'},{type:'boolean'},{type:'null'}]}}
+  }}} as const;
+  server.post<{Params:{id:string;table:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      const values=request.body.values;
+      if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(values);
+      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'$'+(i+1)).join(',')+') RETURNING *',keys.map(k=>values[k]));
+      return reply.code(201).send({row:result.rows[0]});
+    }catch{return reply.code(400).send({error:'Unable to insert record; check column types and required values'});}
+  });
+  server.patch<{Params:{id:string;table:string;rowId:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId)||!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid record or values'});
+      const keys=Object.keys(request.body.values);
+      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'=$'+(i+1)).join(',')+' WHERE "id"=$'+(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {row:result.rows[0]};
+    }catch{return reply.code(400).send({error:'Unable to update record; check values'});}
+  });
+  server.delete<{Params:{id:string;table:string;rowId:string}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+      const result=await pool!.query('DELETE FROM '+quoted(t.schema)+'.'+quoted(request.params.table)+' WHERE "id"=$1 RETURNING id',[request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {deleted:true};
+    }catch{return reply.code(503).send({error:'Unable to delete record'});}
+  });
+
+}
++(i+1)).join(',')+') RETURNING *',keys.map(k=>request.body.values[k]));
+      return reply.code(201).send({row:result.rows[0]});
+    }catch{return reply.code(400).send({error:'Unable to insert record'});}
+  });
+  server.patch<{Params:{id:string;table:string;rowId:string};Body:{values:Record<string,unknown>}}>('/api/data/:id/:table/:rowId',{schema:externalMutationSchema},async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+    try{
+      const t=await externalWriteTable(request.params.id,request.params.table,request.headers.authorization);
+      if(!t)return reply.code(403).send({error:'Write access denied or table unavailable'});
+      if(!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(request.body.values);
+      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'={type:'object',additionalProperties:false,required:['values'],properties:{
+    values:{type:'object',minProperties:1,maxProperties:40,additionalProperties:{anyOf:[{type:'string',maxLength:10000},{type:'number'},{type:'boolean'},{type:'null'}]}}
+  }}} as const;
+  server.post<{Params:{id:string;table:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      const values=request.body.values;
+      if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(values);
+      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'$'+(i+1)).join(',')+') RETURNING *',keys.map(k=>values[k]));
+      return reply.code(201).send({row:result.rows[0]});
+    }catch{return reply.code(400).send({error:'Unable to insert record; check column types and required values'});}
+  });
+  server.patch<{Params:{id:string;table:string;rowId:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId)||!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid record or values'});
+      const keys=Object.keys(request.body.values);
+      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'=$'+(i+1)).join(',')+' WHERE "id"=$'+(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {row:result.rows[0]};
+    }catch{return reply.code(400).send({error:'Unable to update record; check values'});}
+  });
+  server.delete<{Params:{id:string;table:string;rowId:string}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+      const result=await pool!.query('DELETE FROM '+quoted(t.schema)+'.'+quoted(request.params.table)+' WHERE "id"=$1 RETURNING id',[request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {deleted:true};
+    }catch{return reply.code(503).send({error:'Unable to delete record'});}
+  });
+
+}
++(i+1)).join(',')+' WHERE "id"={type:'object',additionalProperties:false,required:['values'],properties:{
+    values:{type:'object',minProperties:1,maxProperties:40,additionalProperties:{anyOf:[{type:'string',maxLength:10000},{type:'number'},{type:'boolean'},{type:'null'}]}}
+  }}} as const;
+  server.post<{Params:{id:string;table:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      const values=request.body.values;
+      if(!checkValues(values,t.columns))return reply.code(400).send({error:'Invalid columns or values'});
+      const keys=Object.keys(values);
+      const result=await pool!.query('INSERT INTO '+quoted(t.schema)+'.'+quoted(request.params.table)+' ('+keys.map(quoted).join(',')+') VALUES ('+keys.map((_,i)=>'$'+(i+1)).join(',')+') RETURNING *',keys.map(k=>values[k]));
+      return reply.code(201).send({row:result.rows[0]});
+    }catch{return reply.code(400).send({error:'Unable to insert record; check column types and required values'});}
+  });
+  server.patch<{Params:{id:string;table:string;rowId:string};Body:{values:Record<string,unknown>}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',{schema:mutationSchema},async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId)||!checkValues(request.body.values,t.columns))return reply.code(400).send({error:'Invalid record or values'});
+      const keys=Object.keys(request.body.values);
+      const result=await pool!.query('UPDATE '+quoted(t.schema)+'.'+quoted(request.params.table)+' SET '+keys.map((k,i)=>quoted(k)+'=$'+(i+1)).join(',')+' WHERE "id"=$'+(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {row:result.rows[0]};
+    }catch{return reply.code(400).send({error:'Unable to update record; check values'});}
+  });
+  server.delete<{Params:{id:string;table:string;rowId:string}}>('/api/developer/projects/:id/tables/:table/rows/:rowId',async(request,reply)=>{
+    try{
+      const user=await getUser(request.headers.cookie);if(!user)return reply.code(401).send({error:'Not signed in'});
+      const t=await getTable(request.params.id,request.params.table,user.id);
+      if(!t)return reply.code(404).send({error:'Table not found'});
+      if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+      const result=await pool!.query('DELETE FROM '+quoted(t.schema)+'.'+quoted(request.params.table)+' WHERE "id"=$1 RETURNING id',[request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {deleted:true};
+    }catch{return reply.code(503).send({error:'Unable to delete record'});}
+  });
+
+}
++(keys.length+1)+' RETURNING *',[...keys.map(k=>request.body.values[k]),request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {row:result.rows[0]};
+    }catch{return reply.code(400).send({error:'Unable to update record'});}
+  });
+  server.delete<{Params:{id:string;table:string;rowId:string}}>('/api/data/:id/:table/:rowId',async(request,reply)=>{
+    reply.header('Cache-Control','no-store');
+    if(!validId(request.params.rowId))return reply.code(400).send({error:'Invalid record ID'});
+    try{
+      const t=await externalWriteTable(request.params.id,request.params.table,request.headers.authorization);
+      if(!t)return reply.code(403).send({error:'Write access denied or table unavailable'});
+      const result=await pool!.query('DELETE FROM '+quoted(t.schema)+'.'+quoted(request.params.table)+' WHERE "id"=$1 RETURNING id',[request.params.rowId]);
+      if(!result.rowCount)return reply.code(404).send({error:'Record not found'});
+      return {deleted:true};
+    }catch{return reply.code(503).send({error:'Unable to delete record'});}
+  });
   const mutationSchema={body:{type:'object',additionalProperties:false,required:['values'],properties:{
     values:{type:'object',minProperties:1,maxProperties:40,additionalProperties:{anyOf:[{type:'string',maxLength:10000},{type:'number'},{type:'boolean'},{type:'null'}]}}
   }}} as const;
